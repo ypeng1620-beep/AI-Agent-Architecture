@@ -1,0 +1,39 @@
+{
+  "name": "fusion-workspace",
+  "version": "0.1.0",
+  "description": "AI Agent 融合架构 — TAOR循环 + FTS5记忆 + 多通道Gateway + 七模式权限",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/start.ts",
+    "build": "tsc",
+    "start": "tsx src/start.ts",
+    "serve": "tsx src/start.ts --config config/runtime.production.template.json",
+    "check": "tsx src/start.ts --mode agent --memory-backend json --check",
+    "test": "tsx tests/run.ts",
+    "test:watch": "vitest",
+    "test:vitest": "vitest run"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "commander": "^14.0.0",
+    "express": "^5.0.0",
+    "openai": "^6.34.0",
+    "sqlite-vec": "^0.1.9",
+    "uuid": "^13.0.0",
+    "ws": "^8.20.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.0",
+    "vitest": "^4.1.4"
+  },
+  "engines": {
+    "node": ">=22.14.0"
+  }
+}

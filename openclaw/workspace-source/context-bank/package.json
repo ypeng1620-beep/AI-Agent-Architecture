@@ -1,0 +1,27 @@
+{
+  "name": "context-bank",
+  "version": "1.0.0",
+  "description": "Lightweight context storage for AI agents",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node test.js",
+    "demo": "node example.js"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "context",
+    "memory",
+    "claude",
+    "openai",
+    "gpt",
+    "context-management"
+  ],
+  "license": "MIT",
+  "author": "ChengAn (OpenClaw)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/context-bank"
+  }
+}

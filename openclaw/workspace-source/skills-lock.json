@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "skills": {
+    "asyncio": {
+      "source": "bobmatnyc/claude-mpm-skills",
+      "sourceType": "github",
+      "computedHash": "b0e4ea01aa57b38d810784fba2f141a69431157f6284d9ec896a08d52c179ce1"
+    },
+    "chrome-cdp-live-browser": {
+      "source": "aradotso/trending-skills",
+      "sourceType": "github",
+      "computedHash": "81a9fef5d95cc380a100e04a4f30c030aac08845f0b63055c60561f96a980c0b"
+    },
+    "computer-use-agents": {
+      "source": "sickn33/antigravity-awesome-skills",
+      "sourceType": "github",
+      "computedHash": "87c10bb8426c1d81a5531d1127745d36eb5c1542f4da84c7ebcbabbc0b8664d2"
+    },
+    "copaw-ai-assistant": {
+      "source": "aradotso/trending-skills",
+      "sourceType": "github",
+      "computedHash": "a89b4049d8a8f98186b68247edc08475130fa73e9f99be892a3270094fb5237f"
+    },
+    "error-recovery": {
+      "source": "mgd34msu/goodvibes-plugin",
+      "sourceType": "github",
+      "computedHash": "1de67ba63291df8ca9b079075a8c1a0dcc159adce35baf41794ba536e642e2de"
+    },
+    "evolve": {
+      "source": "miles990/self-evolving-agent",
+      "sourceType": "github",
+      "computedHash": "9f2924b22a4c3036b935676d3df6ce654c5a92dfad2284600245008fba1b91a4"
+    },
+    "metaclaw-evolving-agent": {
+      "source": "aradotso/trending-skills",
+      "sourceType": "github",
+      "computedHash": "8ccbc4301bbee16752ddca5f7044ea6d166358787128166cca9d57da10946041"
+    },
+    "nvidia-nemoclaw": {
+      "source": "aradotso/trending-skills",
+      "sourceType": "github",
+      "computedHash": "904fdd613d1053b342d60da5cf51d2baae8c8a82cbb7a1d91c03fc97e9f8451c"
+    },
+    "openclaw-control-center": {
+      "source": "aradotso/trending-skills",
+      "sourceType": "github",
+      "computedHash": "a797a565682ae44e806e0b18ae66cdeaa3c4d19fa3321a952371673d279c8457"
+    },
+    "openclaw-session-manager": {
+      "source": "BrantonLiu/openclaw-session-manager",
+      "sourceType": "github",
+      "computedHash": "6f4c7609927ef3371f1f7fa453fcf97bae00ed6499bd9ad6dadc6ca995f70042"
+    },
+    "pua-en": {
+      "source": "tanweai/pua",
+      "sourceType": "github",
+      "computedHash": "f9b6283c85adb2d9bc0cff76e8cebe7ae92077b53610b5932f71362f85fcec47"
+    },
+    "python-background-jobs": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "computedHash": "05cccc6b1d42b0ffbf2ded8ee6f641251adf2262ee0019f3c1a8daeb5a9be548"
+    },
+    "session-manager": {
+      "source": "RichardHojunJang/session-manager",
+      "sourceType": "github",
+      "computedHash": "6289b9b56b3db1f29825e3fddb4df39c5f2b388aa9a2cd18e8388d1d4dbd2e6f"
+    }
+  }
+}

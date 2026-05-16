@@ -1,0 +1,43 @@
+# 承安定时任务配置
+# 创建时间: 2026-03-20
+
+tasks:
+  # 08:30 贵阳云岩区天气预报
+  - name: "承安-天气预报0830"
+    agent: main
+    cron: "30 8 * * *"
+    tz: "Asia/Shanghai"
+    message: "获取中国贵州省贵阳市云岩区今日天气预报，简洁播报"
+    timeout: 20
+
+  # 09:30 全球晨报
+  - name: "承安-晨报0930"
+    agent: main
+    cron: "30 9 * * *"
+    tz: "Asia/Shanghai"
+    message: "全球实时新闻+热点汇总 → 生成每日晨报"
+    timeout: 45
+
+  # 11:00 GitHub技能学习
+  - name: "承安-GitHub技能学习1100"
+    agent: main
+    cron: "0 11 * * *"
+    tz: "Asia/Shanghai"
+    message: "查看GitHub榜单最新、最火的60个技能，根据自身进化需求筛选学习"
+    timeout: 3600
+
+  # 13:00 自我巡检
+  - name: "承安-自我巡检1300"
+    agent: main
+    cron: "0 13 * * *"
+    tz: "Asia/Shanghai"
+    message: "启动自我巡检功能，审查运行中的错误、漏洞，自动尝试修复可识别的问题"
+    timeout: 3600
+
+  # 20:30 晚报+工作总结
+  - name: "承安-晚报2030"
+    agent: main
+    cron: "30 20 * * *"
+    tz: "Asia/Shanghai"
+    message: "1. 今日最新热点、新闻汇总 2. 承财、承安、承平全天工作情况汇总 3. 生成完整晚报"
+    timeout: 60

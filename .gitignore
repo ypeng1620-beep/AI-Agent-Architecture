@@ -1,0 +1,76 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Dev tools
+.vite/
+.vite-temp/
+.fusion-runtime/
+.esbuild/
+
+# IDE
+.vscode/
+.idea/
+
+# Large archives
+*.zip
+*.7z
+*.rar
+
+# Database files
+*.db
+*.db-journal
+*.db-wal
+
+# Temp files
+*.tmp
+*.log
+*.txt
+output.txt
+ci_result.txt
+npm-log.txt
+npm-log2.txt
+docker-log.txt
+perf-logs.txt
+
+# Environment & secrets
+.env
+.env.*
+credentials*.json
+*.secret
+
+# OS
+.DS_Store
+Thumbs.db
+$RECYCLE.BIN/
+System Volume Information/
+
+# Phoenix snapshots (runtime state)
+phoenix-snapshots/
+
+# OpenClaw personal data (contains API keys, personal memory)
+openclaw/workspace-source/knowledge/
+openclaw/workspace-source/memory/
+openclaw/workspace-source/distillation/
+openclaw/workspace-source/temp_beta/
+openclaw/workspace-source/tmp/
+openclaw/workspace-source/**/*.db
+openclaw/workspace-source/**/*.jsonl
+
+# FusionWorkspace personal runtime data
+FusionWorkspace/.fallback.json
+FusionWorkspace/phoenix-snapshots/
+
+# Hermes temp
+hermes-agent-main/
+
+# Misc temp
+.tmp-perm-debug/
+temp_*
+selfimp_temp.txt
+workflow-state.json

@@ -1,0 +1,201 @@
+{
+  "tickets": [
+    {
+      "id": "de86adef-6ce4-4a68-a4af-9c029edbb3f5",
+      "number": 1,
+      "title": "测试任务",
+      "description": "",
+      "status": "failed",
+      "agent": "test",
+      "parentId": null,
+      "priority": "normal",
+      "metadata": {},
+      "createdAt": 1775471213371,
+      "startedAt": null,
+      "completedAt": 1775474731834,
+      "result": null,
+      "error": "test",
+      "subtasks": [],
+      "updates": [
+        {
+          "type": "created",
+          "timestamp": 1775471213371
+        },
+        {
+          "type": "failed",
+          "timestamp": 1775474731834,
+          "error": "test",
+          "duration": 3518463
+        }
+      ]
+    },
+    {
+      "id": "d858bc87-8957-4ffd-9088-d1ef926e4cfc",
+      "number": 2,
+      "title": "测试Ticket",
+      "description": "",
+      "status": "failed",
+      "agent": "self-test",
+      "parentId": null,
+      "priority": "normal",
+      "metadata": {},
+      "createdAt": 1775471298765,
+      "startedAt": null,
+      "completedAt": 1775474731836,
+      "result": null,
+      "error": "test",
+      "subtasks": [],
+      "updates": [
+        {
+          "type": "created",
+          "timestamp": 1775471298765
+        },
+        {
+          "type": "failed",
+          "timestamp": 1775474731836,
+          "error": "test",
+          "duration": 3433071
+        }
+      ]
+    },
+    {
+      "id": "d3a2b246-4b81-4ddb-bbfe-3c19e290e26a",
+      "number": 3,
+      "title": "承安自检任务",
+      "description": "",
+      "status": "completed",
+      "agent": "cheng_an",
+      "parentId": null,
+      "priority": "normal",
+      "metadata": {},
+      "createdAt": 1775471356507,
+      "startedAt": 1775471356508,
+      "completedAt": 1775471356509,
+      "result": {
+        "ok": true
+      },
+      "error": null,
+      "subtasks": [],
+      "updates": [
+        {
+          "type": "created",
+          "timestamp": 1775471356507
+        },
+        {
+          "type": "started",
+          "timestamp": 1775471356508
+        },
+        {
+          "type": "completed",
+          "timestamp": 1775471356509,
+          "duration": 1
+        }
+      ]
+    },
+    {
+      "id": "5f9bf06b-0d7c-483b-9093-2008d08c160b",
+      "number": 4,
+      "title": "晨报生成",
+      "description": "",
+      "status": "pending",
+      "agent": "cron",
+      "parentId": null,
+      "priority": "normal",
+      "metadata": {
+        "time": "09:00",
+        "type": "morning"
+      },
+      "createdAt": 1775473994539,
+      "startedAt": null,
+      "completedAt": null,
+      "result": null,
+      "error": null,
+      "subtasks": [],
+      "updates": [
+        {
+          "type": "created",
+          "timestamp": 1775473994539
+        }
+      ]
+    },
+    {
+      "id": "464a5130-816d-4ddc-b88a-80a27c3539f9",
+      "number": 5,
+      "title": "GitHub技能学习",
+      "description": "",
+      "status": "pending",
+      "agent": "cron",
+      "parentId": null,
+      "priority": "normal",
+      "metadata": {
+        "time": "11:00",
+        "type": "learn"
+      },
+      "createdAt": 1775473994540,
+      "startedAt": null,
+      "completedAt": null,
+      "result": null,
+      "error": null,
+      "subtasks": [],
+      "updates": [
+        {
+          "type": "created",
+          "timestamp": 1775473994540
+        }
+      ]
+    },
+    {
+      "id": "d4bd2121-0dea-4997-90d9-df4d659610c5",
+      "number": 6,
+      "title": "晚报生成",
+      "description": "",
+      "status": "pending",
+      "agent": "cron",
+      "parentId": null,
+      "priority": "normal",
+      "metadata": {
+        "time": "20:30",
+        "type": "evening"
+      },
+      "createdAt": 1775473994542,
+      "startedAt": null,
+      "completedAt": null,
+      "result": null,
+      "error": null,
+      "subtasks": [],
+      "updates": [
+        {
+          "type": "created",
+          "timestamp": 1775473994542
+        }
+      ]
+    },
+    {
+      "id": "12e36e76-4d18-451b-bb7d-ac0cda9d9ee0",
+      "number": 7,
+      "title": "足球预测 Phase2",
+      "description": "",
+      "status": "pending",
+      "agent": "cron",
+      "parentId": null,
+      "priority": "normal",
+      "metadata": {
+        "time": "待定",
+        "type": "project"
+      },
+      "createdAt": 1775473994543,
+      "startedAt": null,
+      "completedAt": null,
+      "result": null,
+      "error": null,
+      "subtasks": [],
+      "updates": [
+        {
+          "type": "created",
+          "timestamp": 1775473994543
+        }
+      ]
+    }
+  ],
+  "counter": 7
+}

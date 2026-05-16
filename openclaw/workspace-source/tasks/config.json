@@ -1,0 +1,14 @@
+{
+  "taskManager": {
+    "maxRetries": 3,
+    "baseDelayMs": 1000,
+    "maxDelayMs": 60000,
+    "backoffMultiplier": 2,
+    "warningThreshold": 2
+  },
+  "cron": {
+    "simpleTasksOnly": true,
+    "maxDurationMs": 300000,
+    "splitLargeTasks": true
+  }
+}

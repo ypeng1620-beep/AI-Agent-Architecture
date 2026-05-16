@@ -1,0 +1,15 @@
+{
+  "type": "module",
+  "name": "@openclaw/workspace",
+  "version": "1.0.0",
+  "description": "OpenClaw workspace - Agent Memory and Configuration",
+  "dependencies": {
+    "@openclaw/suite-core": "*",
+    "@openclaw/suite-tool-hub": "*",
+    "@openclaw/suite-permission-hub": "*",
+    "@openclaw/suite-context-hub": "*",
+    "@openclaw/suite-mcp-hub": "*",
+    "@openclaw/suite-coordinator-hub": "*",
+    "@openclaw/suite-integration": "*"
+  }
+}
