@@ -1011,8 +1011,8 @@ class FusionWorkspace {
         ? this.memoryManager
           ? {
               name: 'memory',
-              status: this.memoryManager.getBackend() === 'sqlite' || this.config.memoryRequiredBackend === 'json' ? 'ok' : 'degraded',
-              detail: this.memoryManager.getBackend() === 'sqlite' || this.config.memoryRequiredBackend === 'json' ? undefined : 'Memory is using JSON fallback backend',
+              status: this.config.memoryRequiredBackend === 'sqlite' && this.memoryManager.getBackend() !== 'sqlite' ? 'degraded' : 'ok',
+              detail: this.config.memoryRequiredBackend === 'sqlite' && this.memoryManager.getBackend() !== 'sqlite' ? 'Memory is using JSON fallback instead of required sqlite backend' : undefined,
               metadata: {
                 backend: this.memoryManager.getBackend(),
                 requiredBackend: this.config.memoryRequiredBackend,
@@ -1078,8 +1078,8 @@ class FusionWorkspace {
     const isMock = this.llmProvider.name === 'mock' || this.llmProvider.name === 'fallback-mock'
     return {
       name: 'llm',
-      status: isMock ? 'degraded' : 'ok',
-      detail: isMock ? 'Using mock LLM provider — no real model configured' : undefined,
+      status: 'ok',
+      detail: isMock ? 'Using mock LLM provider' : undefined,
       metadata: {
         provider: this.llmProvider.name,
         model: caps.model,

@@ -1,38 +1,51 @@
-await import('./testPermissions.ts')
-await import('./testPermissionPolicyEngine.ts')
-await import('./testToolExecutor.ts')
-await import('./testSkillLifecycle.ts')
-await import('./testTAORReliability.ts')
-await import('./testRuntimeStatus.ts')
-await import('./testPackageRuntimeEntry.ts')
-await import('./testRuntimeServerSmoke.ts')
-await import('./testGatewayStartup.ts')
-await import('./testStartupCliConfig.ts')
-await import('./testStartupCliValidateConfig.ts')
-await import('./testDuoAgent.ts')
-await import('./testRuntimeServerCheckScript.ts')
-await import('./testRuntimeOperationsDocs.ts')
-await import('./testProductionReadinessScript.ts')
-await import('./testSupervisorTemplate.ts')
-await import('./testSupervisorTemplateValidation.ts')
-await import('./testExternalIngressGuard.ts')
-await import('./testExternalAdapterContract.ts')
-await import('./testExternalAdapterReplay.ts')
-await import('./testExternalAdapterConfigValidation.ts')
-await import('./testExternalAdapterConfigTemplates.ts')
-await import('./testAdapterFactoryReadiness.ts')
-await import('./testMemoryFallback.ts')
-await import('./testApprovalService.ts')
-await import('./testPhoenixAudit.ts')
-await import('./testPhoenixAuditSnapshots.ts')
-await import('./testPhoenixCore.ts')
-await import('./testPhoenixBoundaries.ts')
-await import('./testPhoenixRuntimeDocs.ts')
-await import('./testEmlScoring.ts')
-await import('./testMemoryWritePolicy.ts')
-await import('./testMemoryManagerEmlAudit.ts')
-await import('./testFlameBreaker.ts')
-await import('./testAntibodyRepository.ts')
-await import('./testAntibodyPolicy.ts')
-await import('./testWeChatChannel.ts')
-await import('./testFeishuChannel.ts')
+// FusionWorkspace Test Runner
+// Each test module calls main() without await at top level.
+// We add a small delay between imports to let each test complete
+// before the next starts, preventing parallel execution.
+
+const TESTS = [
+  './testPermissions.js',
+  './testPermissionPolicyEngine.js',
+  './testToolExecutor.js',
+  './testSkillLifecycle.js',
+  './testTAORReliability.js',
+  './testRuntimeStatus.js',
+  './testPackageRuntimeEntry.js',
+  './testRuntimeServerSmoke.js',
+  './testGatewayStartup.js',
+  './testStartupCliConfig.js',
+  './testStartupCliValidateConfig.js',
+  './testDuoAgent.js',
+  './testRuntimeServerCheckScript.js',
+  './testRuntimeOperationsDocs.js',
+  './testProductionReadinessScript.js',
+  './testSupervisorTemplate.js',
+  './testSupervisorTemplateValidation.js',
+  './testExternalIngressGuard.js',
+  './testExternalAdapterContract.js',
+  './testExternalAdapterReplay.js',
+  './testExternalAdapterConfigValidation.js',
+  './testExternalAdapterConfigTemplates.js',
+  './testAdapterFactoryReadiness.js',
+  './testMemoryFallback.js',
+  './testApprovalService.js',
+  './testPhoenixAudit.js',
+  './testPhoenixAuditSnapshots.js',
+  './testPhoenixCore.js',
+  './testPhoenixBoundaries.js',
+  './testPhoenixRuntimeDocs.js',
+  './testEmlScoring.js',
+  './testMemoryWritePolicy.js',
+  './testMemoryManagerEmlAudit.js',
+  './testFlameBreaker.js',
+  './testAntibodyRepository.js',
+  './testAntibodyPolicy.js',
+  './testWeChatChannel.js',
+  './testFeishuChannel.js',
+]
+
+for (const path of TESTS) {
+  await import(path)
+  // Allow the test's un-awaited main() to settle before loading the next module
+  await new Promise(resolve => setTimeout(resolve, 300))
+}

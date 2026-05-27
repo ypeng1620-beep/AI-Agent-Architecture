@@ -162,6 +162,16 @@ http://localhost:8080/api/health   # 健康详情
 npm start -- --mode stdio --memory-backend json
 ```
 
+### SQLite 模式
+
+使用 SQLite 持久化后端（需安装 `better-sqlite3` 原生绑定）：
+
+```powershell
+npm start -- --mode server --memory-backend sqlite
+```
+
+若 SQLite 不可用但显式要求，启动会快速失败而非静默降级。
+
 ### Dashboard
 
 启用 Dashboard 后访问 `http://localhost:8080/dashboard`，通过 WebSocket 实时查看运行时状态和 Phoenix 审计流。
@@ -216,6 +226,25 @@ npm start -- --mode server \
 ```
 
 外部通道受 Phoenix 边界约束，不能绕过内部权限、记忆策略、审计。
+
+---
+
+## 生产运维
+
+运维手册和监督者配置：
+
+```
+docs/OPERATIONS.md
+config/supervisor.production.template.json
+```
+
+`npm run serve` 加载：
+
+```
+config/runtime.production.template.json
+```
+
+`npm run check:supervisor` 验证 `config/supervisor.production.template.json` 的预启动检查、探针、关闭信号、重启策略和外部通道边界。
 
 ---
 
