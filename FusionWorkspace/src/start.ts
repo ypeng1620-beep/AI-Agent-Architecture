@@ -42,6 +42,9 @@ import { AntibodyRepository } from './antibody/antibodyRepository.js'
 import { AntibodyPolicy } from './antibody/antibodyPolicy.js'
 import { AdapterFactory, loadAdapterConfig, type AdapterDefinition } from './gateway/adapterFactory.js'
 import { validateExternalAdapterConfig } from './gateway/externalAdapterConfigValidation.js'
+import { getDefaultProviderRegistry, type LlmConfig } from './llm/providerRegistry.js'
+import type { LlmProvider } from './llm/llmProvider.js'
+import { createMockProvider } from './llm/llmProvider.js'
 
 // =============================================================================
 // 类型定义
@@ -97,6 +100,10 @@ export interface FusionWorkspaceConfig {
   enableMemory?: boolean
   /** WebSocket 路径 */
   wsPath?: string
+  /** 仪表盘静态文件路径 (可选, 如 "./dashboard") */
+  dashboardPath?: string
+  /** 是否启用仪表盘 (默认: true) */
+  dashboardEnabled?: boolean
   /** 审批模式：promise（默认）或 event */
   approvalMode?: 'promise' | 'event'
   /** 审批请求过期时间（毫秒，默认 15 分钟） */
@@ -112,6 +119,12 @@ export interface FusionWorkspaceConfig {
   externalAdapterConfigPath?: string
   externalAdapterAutoRegister?: boolean
   startupHealthCheckOnly?: boolean
+  llm?: LlmConfig
+  llmProvider?: string
+  llmModel?: string
+  llmOptions?: Record<string, unknown>
+  enableVectorSearch?: boolean
+  embeddingDim?: number
 }
 
 /** 命令行参数 */
@@ -128,6 +141,7 @@ interface CLIArgs {
   'memory-backend'?: string
   'external-adapter-config'?: string
   'external-adapter-auto-register'?: boolean
+  'validate-config'?: boolean
   check?: boolean
   help?: boolean
 }
@@ -186,6 +200,7 @@ class FusionWorkspace {
   private flameBreaker?: FlameBreaker
   private antibodyRepository?: AntibodyRepository
   private antibodyPolicy?: AntibodyPolicy
+  private llmProvider?: LlmProvider
   private running: boolean = false
   private stopped: boolean = false
   private startPromise?: Promise<void>
@@ -219,6 +234,8 @@ class FusionWorkspace {
       maxSteps: config.maxSteps ?? 20,
       enableMemory: config.enableMemory ?? true,
       wsPath: config.wsPath ?? '/ws',
+      dashboardPath: config.dashboardPath ?? '',
+      dashboardEnabled: config.dashboardEnabled ?? true,
       approvalMode: config.approvalMode ?? 'promise',
       pendingRequestExpiryMs: config.pendingRequestExpiryMs ?? 15 * 60 * 1000,
       permissionPolicyFixturePath: config.permissionPolicyFixturePath ?? '',
@@ -232,6 +249,12 @@ class FusionWorkspace {
       externalAdapterConfigPath: config.externalAdapterConfigPath ?? '',
       externalAdapterAutoRegister: config.externalAdapterAutoRegister ?? false,
       startupHealthCheckOnly: config.startupHealthCheckOnly ?? false,
+      enableVectorSearch: config.enableVectorSearch ?? false,
+      embeddingDim: config.embeddingDim ?? 384,
+      llm: config.llm ?? { providers: [] },
+      llmProvider: config.llmProvider ?? 'mock',
+      llmModel: config.llmModel ?? 'mock-1.0',
+      llmOptions: config.llmOptions ?? {},
     }
   }
 
@@ -312,6 +335,9 @@ class FusionWorkspace {
     }, this.permissionWorkflow, this.permissionPolicyEngine)
     console.log('[FusionWorkspace] Tool registry initialized')
 
+    // 初始化 LLM provider
+    this.llmProvider = await this.initLlmProvider()
+
     // 初始化技能管理器
     this.skillManager = getDefaultSkillManager()
     if (this.config.skillsDir) {
@@ -325,7 +351,8 @@ class FusionWorkspace {
       try {
         this.memoryManager = new MemoryManager({
           dbPath: this.config.memoryDbPath,
-          enableVectorSearch: false,
+          enableVectorSearch: this.config.enableVectorSearch,
+          embeddingDim: this.config.embeddingDim,
           forceFallback: this.config.memoryForceFallback,
           requiredBackend: this.config.memoryRequiredBackend,
           phoenixAudit: this.phoenixAudit,
@@ -370,6 +397,8 @@ class FusionWorkspace {
         type: 'websocket',
         port: this.config.port,
         wsPath: this.config.wsPath,
+        dashboardPath: this.config.dashboardPath,
+        dashboardEnabled: this.config.dashboardEnabled,
       })
     }
 
@@ -518,6 +547,59 @@ class FusionWorkspace {
     }
   }
 
+  private async initLlmProvider(): Promise<LlmProvider> {
+    // 1) Config file takes priority
+    if (this.config.llm) {
+      const providerModule = await import('./llm/providerRegistry.js')
+      const registry = await providerModule.loadProvidersFromConfig(this.config.llm!)
+      const provider = registry.getDefault()
+      console.log(`[FusionWorkspace] LLM provider from config: ${provider.name}/${provider.model}`)
+      return provider
+    }
+
+    // 2) Explicit provider string (e.g. 'claude', 'openai-compat', 'mock')
+    if (this.config.llmProvider === 'claude') {
+      const { createClaudeProvider } = await import('./llm/claudeProvider.js')
+      const provider = createClaudeProvider({
+        model: this.config.llmModel ?? undefined,
+        ...(this.config.llmOptions as Record<string, unknown>),
+      } as Parameters<typeof createClaudeProvider>[0])
+      console.log(`[FusionWorkspace] LLM provider: claude/${provider.model}`)
+      return provider
+    }
+
+    if (this.config.llmProvider === 'openai-compat') {
+      const { createOpenAICompatProvider } = await import('./llm/openaiCompatProvider.js')
+      const provider = createOpenAICompatProvider({
+        name: 'default',
+        model: this.config.llmModel ?? 'gpt-4o',
+        ...(this.config.llmOptions as Record<string, unknown>),
+      } as Parameters<typeof createOpenAICompatProvider>[0])
+      console.log(`[FusionWorkspace] LLM provider: openai-compat/${provider.model}`)
+      return provider
+    }
+
+    // 3) Mock provider (explicit fallback for development)
+    if (this.config.llmProvider === 'mock') {
+      const provider = createMockProvider({ name: 'mock', model: this.config.llmModel ?? 'mock-1.0' })
+      console.log('[FusionWorkspace] LLM provider: mock')
+      return provider
+    }
+
+    // 4) Auto-detect from environment
+    if (process.env.ANTHROPIC_API_KEY) {
+      const { createClaudeProvider } = await import('./llm/claudeProvider.js')
+      const provider = createClaudeProvider()
+      console.log(`[FusionWorkspace] LLM provider (auto): claude/${provider.model}`)
+      return provider
+    }
+
+    // 5) Fallback to mock
+    const provider = createMockProvider({ name: 'fallback-mock' })
+    console.log('[FusionWorkspace] LLM provider: fallback-mock (no real provider configured)')
+    return provider
+  }
+
   private savePhoenixAuditSnapshotBeforeStop(): void {
     try {
       this.savePhoenixAuditSnapshot({
@@ -566,6 +648,7 @@ class FusionWorkspace {
         }),
         toolRegistry: this.toolRegistry,
         memoryManager: this.memoryManager ?? undefined,
+        llmProvider: this.llmProvider,
         permissionMode: this.config.permissionMode,
         maxSteps: this.config.maxSteps,
         cwd: this.config.cwd,
@@ -944,6 +1027,7 @@ class FusionWorkspace {
       this.phoenixAudit && this.phoenixCore
         ? { name: 'phoenix', status: 'ok', metadata: { mode: 'advisory_only' } }
         : { name: 'phoenix', status: 'unavailable', detail: 'Phoenix governance is not initialized' },
+      this.buildLlmHealthCheck(),
       this.buildGatewayHealthCheck(),
       this.buildExternalAdapterReadinessHealthCheck(),
       this.buildExternalIngressHealthCheck(),
@@ -981,6 +1065,28 @@ class FusionWorkspace {
         activeSessions: status.activeSessions,
         lifecycle: status.lifecycle,
         error: degradedEvent?.metadata?.error,
+      },
+    }
+  }
+
+  private buildLlmHealthCheck(): WorkspaceHealthCheck {
+    if (!this.llmProvider) {
+      return { name: 'llm', status: 'unavailable', detail: 'LLM provider is not initialized' }
+    }
+
+    const caps = this.llmProvider.getCapabilities()
+    const isMock = this.llmProvider.name === 'mock' || this.llmProvider.name === 'fallback-mock'
+    return {
+      name: 'llm',
+      status: isMock ? 'degraded' : 'ok',
+      detail: isMock ? 'Using mock LLM provider — no real model configured' : undefined,
+      metadata: {
+        provider: this.llmProvider.name,
+        model: caps.model,
+        contextWindow: caps.contextWindow,
+        maxOutputTokens: caps.maxOutputTokens,
+        streaming: caps.supportsStreaming,
+        features: caps.supportedFeatures,
       },
     }
   }
@@ -1272,6 +1378,12 @@ export function loadFusionWorkspaceConfigFile(path: string): FusionWorkspaceConf
   if (typeof parsed.externalAdapterConfigPath === 'string') config.externalAdapterConfigPath = parsed.externalAdapterConfigPath
   if (typeof parsed.externalAdapterAutoRegister === 'boolean') config.externalAdapterAutoRegister = parsed.externalAdapterAutoRegister
   if (typeof parsed.startupHealthCheckOnly === 'boolean') config.startupHealthCheckOnly = parsed.startupHealthCheckOnly
+  if (typeof parsed.llmProvider === 'string') config.llmProvider = parsed.llmProvider
+  if (typeof parsed.llmModel === 'string') config.llmModel = parsed.llmModel
+  if (isRecord(parsed.llm)) config.llm = parsed.llm as unknown as LlmConfig
+  if (isRecord(parsed.llmOptions)) config.llmOptions = parsed.llmOptions as Record<string, unknown>
+  if (typeof parsed.enableVectorSearch === 'boolean') config.enableVectorSearch = parsed.enableVectorSearch
+  if (parsed.embeddingDim !== undefined) config.embeddingDim = Number(parsed.embeddingDim)
 
   const memoryBackend = parsed.memoryBackend ?? parsed.memoryRequiredBackend
   if (memoryBackend !== undefined) {
@@ -1333,6 +1445,7 @@ async function main(): Promise<void> {
       'memory-backend': { type: 'string' },
       'external-adapter-config': { type: 'string' },
       'external-adapter-auto-register': { type: 'boolean' },
+      'validate-config': { type: 'boolean' },
       check: { type: 'boolean' },
       help: { type: 'boolean' },
     },
@@ -1345,7 +1458,16 @@ async function main(): Promise<void> {
   --config <path>                  Runtime JSON config file
   --external-adapter-config <path>  External adapter JSON config
   --external-adapter-auto-register  Auto-register external adapters on startup
+  --validate-config                Validate config and print normalized runtime config without starting
   --check                         Start once, print health report, then stop`)
+    return
+  }
+
+  if (args['validate-config']) {
+    console.log(JSON.stringify({
+      valid: true,
+      config: buildFusionWorkspaceConfigFromCliArgs(args),
+    }, null, 2))
     return
   }
 
@@ -1376,5 +1498,8 @@ export { FusionWorkspace }
 
 // 如果是直接运行，执行 CLI
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1].replace(/\\/g, '/')}`).href) {
-  main().catch(console.error)
+  main().catch((error) => {
+    console.error(error)
+    process.exitCode = 1
+  })
 }

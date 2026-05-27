@@ -12,13 +12,13 @@
  * 纯 TypeScript，无 UI 依赖，可独立运行
  */
 
-// MiniMax OpenAI-compatible API
-import OpenAI from 'openai'
 import type { ApprovalEventBus, ApprovalNeededEvent } from '../protocol/approvalEventBus.js'
 import type { LoopController, LoopPausedState } from '../protocol/loopController.js'
 import type { PhoenixAuditStore } from '../orchestrator/phoenixAudit.js'
 import type { PhoenixCore } from '../orchestrator/phoenixCore.js'
 import type { AntibodyRepository } from '../antibody/antibodyRepository.js'
+import OpenAI from 'openai'
+import type { LlmProvider } from '../llm/llmProvider.js'
 
 // =============================================================================
 // 类型定义
@@ -137,6 +137,7 @@ export interface TAORConfig {
   toolExecutor?: ToolExecutor
   /** LLM 调用器（默认使用模拟 LLM） */
   llmCaller?: LLMCaller
+  llmProvider?: LlmProvider
   /** 模型名称 */
   model?: string
   /** 最大循环次数（默认 20） */
@@ -403,8 +404,9 @@ export class TAORLoop {
     }
 
     const fullConfig: MutableConfig = {
-      llmCaller: config.llmCaller ?? (process.env.MINIMAX_API_KEY ? createMiniMaxCaller() : defaultLLMCaller),
-      model: config.model ?? 'claude-3-5-sonnet-20241022',
+      llmCaller: config.llmCaller ?? (config.llmProvider ? undefined : (process.env.MINIMAX_API_KEY ? createMiniMaxCaller() : defaultLLMCaller)),
+      llmProvider: config.llmProvider ?? null,
+      model: config.model ?? 'claude-sonnet-4-6',
       maxSteps: config.maxSteps ?? 20,
       contextWindowSize: config.contextWindowSize ?? 10,
       systemPrompt: config.systemPrompt ?? '',
@@ -960,6 +962,7 @@ export class TAORLoop {
 
     // Step 2: 进入循环
     while (true) {
+      try {
       this.state.stepCount++
 
       // 检查终止条件
@@ -1173,6 +1176,16 @@ export class TAORLoop {
         step: this.state.stepCount,
         contextLength: this.context.length,
       }
+      } catch (error) {
+        this.state.stopReason = 'runtime_error'
+        this.recordAudit(this.state.stepCount, 'error', 'error', `Unhandled loop error: ${error instanceof Error ? error.message : String(error)}`)
+        yield {
+          type: 'error',
+          step: this.state.stepCount,
+          error: error instanceof Error ? error.message : String(error),
+        }
+        break
+      }
     }
 
     // ===== 最终结果 =====
@@ -1248,13 +1261,30 @@ export class TAORLoop {
     let attempt = 0
     let lastError: unknown = null
 
+    // Build per-call options from TAOR config
+    const chatOptions = {
+      systemPrompt: this.config.systemPrompt || undefined,
+      thinkingEnabled: this.config.thinkingEnabled,
+      maxTokens: this.config.maxOutputTokens,
+    }
+
     while (attempt <= this.config.llmRetryAttempts) {
       try {
         this.state.llmAttempts += 1
         this.recordAudit(step, 'llm', 'info', `LLM attempt ${attempt + 1}`)
-        for await (const chunk of this.config.llmCaller(messages, tools, model)) {
-          yield chunk
+
+        if (this.config.llmProvider) {
+          for await (const chunk of this.config.llmProvider.streamChat(messages, tools, chatOptions)) {
+            yield chunk
+          }
+        } else if (this.config.llmCaller) {
+          for await (const chunk of this.config.llmCaller(messages, tools, model)) {
+            yield chunk
+          }
+        } else {
+          throw new Error('No LLM provider or caller configured')
         }
+
         return
       } catch (error) {
         lastError = error
@@ -1317,107 +1347,59 @@ function delay(ms: number): Promise<void> {
 
 // =============================================================================
 // MiniMax LLM Caller（当环境变量 MINIMAX_API_KEY 设置时使用）
+// 内部委托给 OpenAICompatProvider，避免重复构造 OpenAI client。
 // =============================================================================
 
 function createMiniMaxCaller(): LLMCaller {
+  const apiKey = process.env.MINIMAX_API_KEY
+  const baseUrl = process.env.MINIMAX_BASE_URL || 'https://api.minimax.io/v1'
+
+  let provider: import('../llm/llmProvider.js').LlmProvider | null = null
+
   return async function* (
     messages: Message[],
     tools: ToolDef[],
     _model?: string
   ): AsyncGenerator<ResponseChunk, void, unknown> {
-    const apiKey = process.env.MINIMAX_API_KEY
     if (!apiKey) {
       yield { type: 'done', text: 'Error: MINIMAX_API_KEY not set', stop_reason: 'error' }
       return
     }
 
-    const client = new OpenAI({ apiKey, baseURL: 'https://api.minimax.io/v1' })
-
-    // 转换 messages：过滤 system，转换 role 和 content
-    const systemMsg = messages.find(m => m.role === 'system')
-    const nonSystemMsgs = messages.filter(m => m.role !== 'system')
-
-    const openaiMessages: Array<{ role: string; content: string | null; tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }> }> = []
-
-    if (systemMsg) {
-      openaiMessages.push({
-        role: 'system',
-        content: typeof systemMsg.content === 'string' ? systemMsg.content : ('text' in systemMsg.content ? systemMsg.content.text : ''),
+    // Lazy-init provider on first call
+    if (!provider) {
+      const { createOpenAICompatProvider } = await import('../llm/openaiCompatProvider.js')
+      provider = createOpenAICompatProvider({
+        name: 'minimax',
+        model: 'MiniMax-M2.7',
+        baseURL: baseUrl,
+        apiKey,
       })
     }
 
-    for (const m of nonSystemMsgs) {
-      if (typeof m.content === 'object' && 'type' in m.content) {
-        if (m.content.type === 'tool_result') {
-          const tc = m.content as { type: 'tool_result'; tool_use_id: string; content: string | unknown[] }
-          openaiMessages.push({
-            role: 'tool',
-            content: typeof tc.content === 'string' ? tc.content : JSON.stringify(tc.content),
-          } as unknown as { role: string; content: string | null; tool_calls?: never })
-        } else if (m.content.type === 'tool_use') {
-          const tc = m.content as { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
-          openaiMessages.push({
-            role: 'assistant',
-            content: null,
-            tool_calls: [{
-              id: tc.id,
-              type: 'function',
-              function: { name: tc.name, arguments: JSON.stringify(tc.input) },
-            }],
-          })
-        } else {
-          const tc = m.content as { type: 'text'; text: string }
-          openaiMessages.push({ role: m.role, content: tc.text })
-        }
-      } else {
-        openaiMessages.push({ role: m.role, content: typeof m.content === 'string' ? m.content : '' })
+    // Convert TAOR internal Message[] to standard chat messages
+    const chatMessages = messages.map(m => {
+      if (typeof m.content === 'string') {
+        return { role: m.role, content: m.content }
       }
-    }
-
-    // 转换工具
-    const openaiTools = tools.map(t => ({
-      type: 'function' as const,
-      function: {
-        name: t.name,
-        description: t.description || '',
-        parameters: t.input_schema || { type: 'object', properties: {} },
-      },
-    }))
+      const c = m.content as unknown as Record<string, unknown>
+      if (c.type === 'text') {
+        return { role: m.role, content: (c as { text: string }).text }
+      }
+      if (c.type === 'tool_result') {
+        const tc = c as { tool_use_id: string; content: unknown }
+        return { role: 'tool' as const, content: typeof tc.content === 'string' ? tc.content : JSON.stringify(tc.content) }
+      }
+      if (c.type === 'tool_use') {
+        const tc = c as { id: string; name: string; input: Record<string, unknown> }
+        return { role: 'assistant' as const, content: JSON.stringify({ tool_use: { id: tc.id, name: tc.name, input: tc.input } }) }
+      }
+      return { role: m.role, content: '' }
+    })
 
     try {
-      const response = await client.chat.completions.create({
-        model: 'MiniMax-M2.7',
-        messages: openaiMessages as OpenAI.Chat.ChatCompletionMessageParam[],
-        tools: openaiTools.length > 0 ? openaiTools : undefined,
-        tool_choice: 'auto',
-      })
-
-      const choice = response.choices[0]
-      const message = choice.message
-
-      if (message.tool_calls && message.tool_calls.length > 0) {
-        for (const tc of message.tool_calls) {
-          if (tc.type !== 'function') continue
-          const func = tc.function
-          const args = typeof func.arguments === 'string'
-            ? JSON.parse(func.arguments)
-            : func.arguments
-          yield {
-            type: 'content_block',
-            content: {
-              type: 'tool_use',
-              id: tc.id,
-              name: func.name,
-              input: args,
-            } as ToolUseContent,
-          }
-        }
-      } else {
-        yield {
-          type: 'done',
-          text: message.content || '',
-          stop_reason: choice.finish_reason || 'end_turn',
-        }
+      for await (const chunk of provider.streamChat(chatMessages as unknown as Message[], tools, {})) {
+        yield chunk
       }
     } catch (error) {
       console.error('[MiniMax] API error:', error)

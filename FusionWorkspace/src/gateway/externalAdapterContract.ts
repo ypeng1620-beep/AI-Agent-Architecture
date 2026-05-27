@@ -89,6 +89,14 @@ export function normalizeFeishuInbound(payload: FeishuInboundPayload): Normalize
   const messageType = message?.message_type ?? 'unknown'
   const externalUserId = message?.sender?.sender_id?.open_id ?? 'unknown'
 
+  // Warn if required fields are missing — prevents silently swallowing upstream issues
+  if (!message?.message_id && !payload.body.header?.event_id) {
+    console.warn('[normalizeFeishuInbound] Missing both message_id and event_id — upstream payload may be malformed')
+  }
+  if (!message?.sender?.sender_id?.open_id) {
+    console.warn('[normalizeFeishuInbound] Missing sender open_id — user identity may be lost')
+  }
+
   return {
     channel: 'feishu',
     messageId,

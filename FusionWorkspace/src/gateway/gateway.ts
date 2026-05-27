@@ -14,6 +14,8 @@ import { WebSocketServer, WebSocket } from 'ws'
 import { createServer, IncomingMessage, ServerResponse, Server } from 'http'
 import express, { Express, Request, Response, NextFunction } from 'express'
 import { randomUUID } from 'crypto'
+import { join } from 'path'
+import { existsSync } from 'fs'
 import type { MessageType, OutboundMessageType } from '../protocol/messageTypes.js'
 import type { AdapterCapabilities } from '../protocol/adapterSchema.js'
 import { DEFAULT_CAPABILITIES, WEBSOCKET_CAPABILITIES, STDIO_CAPABILITIES } from '../protocol/adapterSchema.js'
@@ -70,6 +72,10 @@ export interface ChannelConfig {
   connectionTimeout?: number
   /** 最大消息大小 */
   maxMessageSize?: number
+  /** 仪表盘静态文件路径 (可选, 如 "./dashboard") */
+  dashboardPath?: string
+  /** 是否启用仪表盘 (默认: true) */
+  dashboardEnabled?: boolean
 }
 
 /** 会话 */
@@ -144,10 +150,11 @@ export class MessageRouter {
     }
 
     // 匹配路由
-    const handlers = this.routes.get('*') ?? []
+    const wildcardHandlers = this.routes.get('*') ?? []
 
     for (const [pattern, handlers] of this.routes) {
-      if (pattern === '*' || message.content.includes(pattern)) {
+      if (pattern === '*') continue  // wildcards dispatched once below
+      if (message.content.includes(pattern)) {
         for (const handler of handlers) {
           await handler(processedMessage)
         }
@@ -155,7 +162,7 @@ export class MessageRouter {
     }
 
     // 执行通用处理器
-    for (const handler of handlers) {
+    for (const handler of wildcardHandlers) {
       await handler(processedMessage)
     }
   }
@@ -183,6 +190,8 @@ export interface IChannel {
   getStats(): Record<string, unknown>
   /** 获取适配器能力声明 */
   getCapabilities(): AdapterCapabilities
+  /** Channel health probe — optionally checks external API reachability. */
+  healthCheck?(): Promise<{ status: 'ok' | 'degraded' | 'unavailable'; detail?: string }>
 }
 
 // =============================================================================
@@ -222,6 +231,17 @@ export class WebSocketChannel implements IChannel {
   async start(): Promise<void> {
     const app = express()
     app.use(express.json({ limit: this.config.maxMessageSize }))
+
+    // Dashboard static files
+    const dashboardEnabled = this.config.dashboardEnabled ?? true
+    const dashboardPath = this.config.dashboardPath
+    if (dashboardEnabled && dashboardPath) {
+      const resolved = join(process.cwd(), dashboardPath)
+      if (existsSync(resolved)) {
+        app.use('/dashboard', express.static(resolved))
+        console.log(`[Gateway] Dashboard served from ${resolved} at /dashboard`)
+      }
+    }
 
     app.get(`${this.config.httpPrefix}/live`, (_req: Request, res: Response) => {
       res.json({
@@ -531,11 +551,19 @@ export class WebhookChannel implements IChannel {
     const message = this.messageQueue.shift()
     if (!message) return
 
+    const MAX_RETRIES = 3
+    const retries = (message as any)._retries ?? 0
+
     try {
       await this.deliverMessage(message)
     } catch (error) {
-      console.warn(`[Webhook] Failed to deliver message ${message.id}:`, error)
-      // 保留在队列中等待下次重试
+      if (retries < MAX_RETRIES) {
+        (message as any)._retries = retries + 1
+        this.messageQueue.push(message)
+        console.warn(`[Webhook] Delivery failed for ${message.id}, requeued (${retries + 1}/${MAX_RETRIES})`)
+      } else {
+        console.error(`[Webhook] Delivery failed permanently for ${message.id}:`, error)
+      }
     }
   }
 

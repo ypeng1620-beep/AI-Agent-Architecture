@@ -61,6 +61,37 @@ export interface MemoryInjectionResult {
 }
 
 // =============================================================================
+// 注入安全防护
+// =============================================================================
+
+/** Patterns that indicate prompt injection attempts in recalled context. */
+const INJECTION_PATTERNS: RegExp[] = [
+  /ignore\s+(all\s+)?(previous|above|prior)\s+instructions/gi,
+  /forget\s+(all\s+)?(previous|above|prior)\s+(instructions|context)/gi,
+  /you\s+are\s+now\s+(a\s+)?(different|new)\s+(ai|assistant|agent)/gi,
+  /system\s*prompt\s*:\s*/gi,
+  /\[INST\].*\[\/INST\]/gi,
+  /<\|im_start\|>/gi,
+  /disregard\s+(all\s+)?(previous|above)/gi,
+  /override\s+(system|safety|security)/gi,
+  /bypass\s+(permission|approval|gate|security)/gi,
+  /pretend\s+(you\s+are|to\s+be)/gi,
+  /act\s+as\s+(if|though)\s+you/gi,
+]
+
+/**
+ * Sanitize recalled context to prevent prompt injection through stored memories.
+ * Strips known injection patterns and replaces them with safe markers.
+ */
+export function sanitizeRecallContext(text: string): string {
+  let sanitized = text
+  for (const pattern of INJECTION_PATTERNS) {
+    sanitized = sanitized.replace(pattern, '[FILTERED]')
+  }
+  return sanitized
+}
+
+// =============================================================================
 // 记忆注入器
 // =============================================================================
 
@@ -91,7 +122,10 @@ export class MemoryInjector {
   injectOnStartup(options: {
     userId?: string
     sessionId?: string
+    /** Whether to include Session context (default: true). Set to false when composing with injectPerTurn. */
+    includeSession?: boolean
   }): MemoryInjectionResult {
+    const includeSession = options.includeSession ?? true
     const parts: string[] = []
     const tokens = { profile: 0, session: 0, knowledge: 0, episodic: 0, total: 0 }
     const truncatedLayers: string[] = []
@@ -113,26 +147,28 @@ export class MemoryInjector {
       }
     }
 
-    // 2. Session 摘要
-    const sessionText = this.memory.session.formatForPrompt(this.config.maxSessionTurns, options.sessionId)
-    if (sessionText) {
-      const sessionTokens = this.estimateTokens(sessionText)
-      const budget = this.config.maxInjectionTokens * this.config.sessionTokenRatio
-      if (sessionTokens <= budget) {
-        parts.push(sessionText)
-        tokens.session = sessionTokens
-      } else {
-        const truncated = this.truncateText(sessionText, budget)
-        parts.push(truncated)
-        tokens.session = budget
-        truncatedLayers.push('session')
+    // 2. Session 摘要 (can be skipped when composing with injectPerTurn)
+    if (includeSession) {
+      const sessionText = this.memory.session.formatForPrompt(this.config.maxSessionTurns, options.sessionId)
+      if (sessionText) {
+        const sessionTokens = this.estimateTokens(sessionText)
+        const budget = this.config.maxInjectionTokens * this.config.sessionTokenRatio
+        if (sessionTokens <= budget) {
+          parts.push(sessionText)
+          tokens.session = sessionTokens
+        } else {
+          const truncated = this.truncateText(sessionText, budget)
+          parts.push(truncated)
+          tokens.session = budget
+          truncatedLayers.push('session')
+        }
       }
     }
 
     tokens.total = tokens.profile + tokens.session + tokens.knowledge + tokens.episodic
 
     return {
-      injectedText: parts.length > 0 ? `\n--- Memory Context (Startup) ---\n${parts.join('\n')}\n--- End Memory Context ---\n` : '',
+      injectedText: parts.length > 0 ? sanitizeRecallContext(`\n--- Memory Context (Startup) ---\n${parts.join('\n')}\n--- End Memory Context ---\n`) : '',
       tokenEstimate: tokens,
       wasTruncated: truncatedLayers.length > 0,
       truncatedLayers,
@@ -203,7 +239,7 @@ export class MemoryInjector {
     tokens.total = tokens.profile + tokens.session + tokens.knowledge + tokens.episodic
 
     return {
-      injectedText: parts.length > 0 ? `\n--- Memory Context (Turn) ---\n${parts.join('\n')}\n--- End Memory Context ---\n` : '',
+      injectedText: parts.length > 0 ? sanitizeRecallContext(`\n--- Memory Context (Turn) ---\n${parts.join('\n')}\n--- End Memory Context ---\n`) : '',
       tokenEstimate: tokens,
       wasTruncated: truncatedLayers.length > 0,
       truncatedLayers,
@@ -220,13 +256,14 @@ export class MemoryInjector {
     queryKeywords?: string[]
     currentToolName?: string
   }): MemoryInjectionResult {
-    // 启动注入
+    // 启动注入 (Profile only — Session handled by injectPerTurn)
     const startup = this.injectOnStartup({
       userId: options.userId,
       sessionId: options.sessionId,
+      includeSession: false,
     })
 
-    // 每轮注入
+    // 每轮注入 (Session + Knowledge + Episodic)
     const perTurn = this.injectPerTurn({
       userId: options.userId,
       sessionId: options.sessionId,
@@ -234,14 +271,15 @@ export class MemoryInjector {
       currentToolName: options.currentToolName,
     })
 
-    // 合并
+    // 合并 — avoid double-counting Session from both injectors
     const combinedText = startup.injectedText + perTurn.injectedText
     const combinedTokens = {
       profile: startup.tokenEstimate.profile + perTurn.tokenEstimate.profile,
-      session: startup.tokenEstimate.session + perTurn.tokenEstimate.session,
+      session: perTurn.tokenEstimate.session,  // only count Session once (from perTurn)
       knowledge: startup.tokenEstimate.knowledge + perTurn.tokenEstimate.knowledge,
       episodic: startup.tokenEstimate.episodic + perTurn.tokenEstimate.episodic,
-      total: startup.tokenEstimate.total + perTurn.tokenEstimate.total,
+      total: startup.tokenEstimate.profile + perTurn.tokenEstimate.session
+        + perTurn.tokenEstimate.knowledge + perTurn.tokenEstimate.episodic,
     }
 
     const allTruncated = [...startup.truncatedLayers, ...perTurn.truncatedLayers]

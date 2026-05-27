@@ -138,6 +138,29 @@ diagnosis.
 - `npm run check` is the standard local runtime smoke test. It starts
   FusionWorkspace in agent mode, prints the health report, and shuts down
   cleanly through `--check`.
+- `npm run check:config` is the standard pre-start runtime configuration gate.
+  It calls `--validate-config`, prints the normalized runtime config, and exits
+  without starting gateway listeners, provider adapters, memory managers, or
+  other long-running resources. Invalid runtime config must return a non-zero
+  process exit code so supervisors and deployment scripts can fail fast before
+  traffic is attached.
+- `npm run check:serve` is the standard production-template server probe gate.
+  It starts the runtime from the checked-in production template, verifies
+  `/api/live` and `/api/ready`, then shuts the runtime down. The command must
+  emit machine-readable JSON on stdout so deployment scripts can consume it.
+- `npm run check:supervisor` validates the checked-in supervisor handoff
+  template, including pre-start checks, probe URLs, shutdown signal, restart
+  limits, and the disabled external-provider traffic boundary.
+- `npm run check:production` is the single production-readiness gate. It must
+  validate the checked-in runtime config, start the production-template server,
+  verify live and ready probes, emit machine-readable JSON, and stop the
+  runtime before exiting.
+- `config/supervisor.production.template.json` is the machine-readable
+  supervisor handoff. It must keep `npm run check:production` as the pre-start
+  gate, `npm run serve` as the start command, `SIGTERM` as the shutdown signal,
+  bounded restart policy, and live/ready/health probes. External adapter
+  auto-registration and provider traffic attachment remain disabled in the
+  template.
 - Long-running HTTP server mode exposes stable probe endpoints. `/api/live`
   is a lightweight liveness probe for the HTTP/WebSocket process and must not
   require all internal readiness checks to pass. `/api/ready` exposes

@@ -10,11 +10,15 @@
  * - 群聊支持
  * - 文件/图片上传
  * - 消息去重
+ * - HMAC-SHA256 签名验证
+ * - v1 / v2 事件双协议支持
+ * - Card action 回调处理
+ * - Token 刷新重试与超时保护
  */
 
 import { createServer, Server } from 'http'
 import express, { Request, Response } from 'express'
-import { randomUUID } from 'crypto'
+import { randomUUID, createHmac, timingSafeEqual } from 'crypto'
 import { ExternalChannel, type ExternalChannelConfig } from './externalChannel.js'
 import { assertExternalAdapterConfigReady } from './externalAdapterConfigValidation.js'
 import type { Session, ChannelMessage } from '../gateway/gateway.js'
@@ -126,7 +130,13 @@ export class FeishuChannel extends ExternalChannel {
     }
 
     const app = express()
-    app.use(express.json())
+
+    // Parse JSON bodies while capturing raw body buffer for HMAC signature verification
+    app.use(express.json({
+      verify: (req: Request & { rawBody?: string }, _res, buf: Buffer) => {
+        (req as any).rawBody = buf.toString('utf8')
+      }
+    }))
 
     const path = this.feishuConfig.adapterOptions.path ?? '/feishu'
 
@@ -135,9 +145,21 @@ export class FeishuChannel extends ExternalChannel {
       try {
         const body = req.body as FeishuEvent
 
-        // URL 验证挑战
+        // --- HMAC-SHA256 签名验证 ---
+        if (this.feishuConfig.adapterOptions.encryptKey) {
+          const timestamp = (req.headers['x-lark-request-timestamp'] as string) ?? ''
+          const signature = (req.headers['x-lark-signature'] as string) ?? ''
+          const rawBody = (req as any).rawBody as string
+
+          if (!this.verifySignature(timestamp, rawBody, signature)) {
+            res.status(401).json({ code: 401, error: 'Invalid signature' })
+            return
+          }
+        }
+
+        // URL 验证挑战（v1 & v2 均支持）
         if (body.header?.event_type === 'url_verification') {
-          res.json({ challenge: (body.event as any)?.challenge })
+          res.json({ challenge: (body.event?.challenge as string | undefined) ?? '' })
           return
         }
 
@@ -149,7 +171,7 @@ export class FeishuChannel extends ExternalChannel {
           }
         }
 
-        // 处理消息事件
+        // --- v1 消息事件 ---
         if (body.header?.event_type === 'im.message.receive_v1' && body.event?.message) {
           const message = body.event.message as FeishuMessage
 
@@ -179,6 +201,98 @@ export class FeishuChannel extends ExternalChannel {
           )
         }
 
+        // --- v2 消息事件 ---
+        if (body.header?.event_type === 'im.message.receive_v2' && body.event?.message) {
+          const v2Msg = body.event.message as Record<string, unknown> & FeishuMessage
+
+          // v2 内容在 body.content（JSON 字符串），而非顶级 content
+          const v2Body = (v2Msg as any).body as { content?: string } | undefined
+          let content = (v2Msg as any).content as string | undefined ?? ''
+          if (v2Body?.content) {
+            content = v2Body.content
+          }
+          if (typeof content === 'string' && content.trim().startsWith('{')) {
+            try {
+              const parsed = JSON.parse(content)
+              content = parsed.text ?? content
+            } catch {
+              // 保持原始内容
+            }
+          }
+
+          // v2 发送者结构: sender.id.open_id（不同于 v1 的 sender.sender_id.open_id）
+          const v2Sender = (v2Msg as any).sender as any
+          const openId =
+            v2Sender?.id?.open_id ??
+            v2Sender?.sender_id?.open_id ??
+            'unknown'
+
+          const metadata: Record<string, unknown> = {
+            messageType: v2Msg.message_type ?? 'unknown',
+            chatId: v2Msg.chat_id,
+            messageId: v2Msg.message_id as string,
+            threadId: (v2Msg as any).thread_id as string | undefined,
+            parentId: (v2Msg as any).parent_id as string | undefined,
+            rootId: (v2Msg as any).root_id as string | undefined,
+          }
+
+          await this.handleInboundMessage(
+            v2Msg.message_id as string,
+            openId,
+            content,
+            metadata,
+          )
+        }
+
+        // --- 卡片动作回调 ---
+        if (body.header?.event_type === 'card.action.trigger') {
+          const actionEvent = body.event as Record<string, unknown>
+          const openId = (actionEvent.open_id as string) ?? 'unknown'
+          const messageId = body.header.event_id
+
+          let actionMessage = ''
+          const action = actionEvent.action as { value?: unknown } | undefined
+          if (action?.value) {
+            try {
+              // Handle both string and object formats (Feishu serialization varies by API version)
+              const raw = action.value
+              let actionType = ''
+              let requestId = ''
+              if (typeof raw === 'string') {
+                const parsed = JSON.parse(raw) as { action?: string; requestId?: string }
+                actionType = parsed.action ?? ''
+                requestId = parsed.requestId ?? ''
+              } else if (typeof raw === 'object' && raw !== null) {
+                const obj = raw as { action?: string; requestId?: string }
+                actionType = obj.action ?? ''
+                requestId = obj.requestId ?? ''
+              }
+              if (actionType && requestId) {
+                actionMessage = `${actionType} ${requestId}`
+              } else {
+                actionMessage = typeof raw === 'string' ? raw : JSON.stringify(raw)
+              }
+            } catch {
+              actionMessage = typeof action.value === 'string' ? action.value : JSON.stringify(action.value)
+            }
+          }
+
+          if (actionMessage) {
+            const metadata: Record<string, unknown> = {
+              eventType: 'card.action.trigger',
+              actionValue: action?.value,
+              openId,
+            }
+
+            await this.handleInboundMessage(
+              messageId,
+              openId,
+              actionMessage,
+              metadata,
+            )
+          }
+        }
+
         // 飞书要求 3s 内响应 200
         res.json({ code: 0 })
       } catch (error) {
@@ -187,7 +301,7 @@ export class FeishuChannel extends ExternalChannel {
       }
     })
 
-    // 获取 tenant access token
+    // 获取 tenant access token（带重试）
     await this.refreshToken()
 
     // 启动服务器
@@ -248,7 +362,7 @@ export class FeishuChannel extends ExternalChannel {
     const card = {
       config: { wide_screen_mode: true },
       header: {
-        title: { tag: 'plain_text', content: '🔒 工具调用审批' },
+        title: { tag: 'plain_text', content: '\u{1F512} 工具调用审批' },
         template: 'orange',
       },
       elements: [
@@ -282,27 +396,9 @@ export class FeishuChannel extends ExternalChannel {
     await this.sendInteractiveCard(openId, card)
   }
 
-  /** 显示输入中状态 */
-  async showTyping(openId: string): Promise<void> {
-    // 飞书支持输入中状态
-    try {
-      const token = await this.getAccessToken()
-      const url = `https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id`
-      await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          receive_id: openId,
-          msg_type: 'typing',
-          content: JSON.stringify({ text: 'typing...' }),
-        }),
-      })
-    } catch {
-      // 忽略输入中状态失败
-    }
+  /** 显示输入中状态（飞书不支持通过消息 API 发送 typing indicator，仅记录 debug 日志） */
+  async showTyping(_openId: string): Promise<void> {
+    console.debug(`[Feishu] showTyping called for ${_openId} — no-op (typing indicator not supported via Feishu message API)`)
   }
 
   /** 获取统计 */
@@ -323,27 +419,77 @@ export class FeishuChannel extends ExternalChannel {
   // 私有方法
   // =============================================================================
 
-  private async refreshToken(): Promise<void> {
-    try {
-      const { appId, appSecret } = this.feishuConfig.adapterOptions
-      const url = 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal'
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
-      })
-      const data = await response.json() as { tenant_access_token?: string; expire?: number; code?: number; msg?: string }
+  /**
+   * HMAC-SHA256 签名验证
+   *
+   * 计算公式: HMAC-SHA256(encryptKey, timestamp + '\n' + body)
+   * 与 X-Lark-Signature 请求头比对，使用 timingSafeEqual 防止时序攻击。
+   */
+  private verifySignature(timestamp: string, body: string, incomingSignature: string): boolean {
+    const encryptKey = this.feishuConfig.adapterOptions.encryptKey
+    if (!encryptKey) return true
 
-      if (data.tenant_access_token) {
-        this.tenantAccessToken = data.tenant_access_token
-        this.tokenExpiry = Date.now() + (data.expire ?? 7200) * 1000
-        console.log('[Feishu] Tenant access token refreshed')
-      } else {
-        console.warn('[Feishu] Failed to refresh token:', data.msg)
-      }
-    } catch (error) {
-      console.error('[Feishu] Error refreshing token:', error)
+    try {
+      const computed = createHmac('sha256', encryptKey)
+        .update(timestamp + '\n' + body)
+        .digest('hex')
+
+      const computedBuf = Buffer.from(computed)
+      const sigBuf = Buffer.from(incomingSignature)
+
+      if (computedBuf.length !== sigBuf.length) return false
+      return timingSafeEqual(computedBuf, sigBuf)
+    } catch {
+      return false
     }
+  }
+
+  /**
+   * 刷新 tenant access token
+   *
+   * 带 10s 超时保护与 3 次指数退避重试。
+   */
+  private async refreshToken(): Promise<void> {
+    const maxAttempts = 3
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const { appId, appSecret } = this.feishuConfig.adapterOptions
+        const url = 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal'
+
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+          signal: AbortSignal.timeout(10000),
+        })
+
+        const data = await response.json() as {
+          tenant_access_token?: string
+          expire?: number
+          code?: number
+          msg?: string
+        }
+
+        if (data.tenant_access_token) {
+          this.tenantAccessToken = data.tenant_access_token
+          this.tokenExpiry = Date.now() + (data.expire ?? 7200) * 1000
+          console.log('[Feishu] Tenant access token refreshed')
+          return
+        } else {
+          console.warn(`[Feishu] Failed to refresh token (attempt ${attempt}):`, data.msg)
+        }
+      } catch (error) {
+        console.error(`[Feishu] Error refreshing token (attempt ${attempt}):`, error)
+      }
+
+      if (attempt < maxAttempts) {
+        const delay = Math.pow(2, attempt) * 1000 // 2s, 4s
+        await new Promise(resolve => setTimeout(resolve, delay))
+      }
+    }
+
+    console.error('[Feishu] All token refresh attempts failed')
   }
 
   private async getAccessToken(): Promise<string> {

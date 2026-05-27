@@ -4,6 +4,15 @@
 export { TAORLoop, runTAOR } from './agent/taorLoop.js'
 export { FTS5MemoryStore, embed, getDefaultStore } from './memory/fts5Memory.js'
 export { MemoryManager, getDefaultManager } from './memory/memoryManager.js'
+export {
+  getEmbeddingProvider,
+  setEmbeddingProvider,
+  embedBatch,
+  OllamaEmbeddingProvider,
+  OpenAIEmbeddingProvider,
+  DeterministicEmbeddingProvider,
+} from './memory/embeddingService.js'
+export type { EmbeddingProvider } from './memory/embeddingService.js'
 export { MemoryPolicy } from './memory/memoryPolicy.js'
 export { SessionStore } from './memory/sessionStore.js'
 export { MemoryWritePolicy } from './memory/memoryWritePolicy.js'
@@ -17,7 +26,7 @@ export type {
   EmlThresholds,
 } from './memory/emlScoring.js'
 export { TrajectoryCompressor } from './memory/trajectoryCompression.js'
-export { MemoryInjector } from './memory/memoryInjection.js'
+export { MemoryInjector, sanitizeRecallContext } from './memory/memoryInjection.js'
 export {
   LayeredMemoryManager,
   ProfileMemory,
@@ -85,8 +94,31 @@ export type {
   SkillForgeRequest,
   SkillDraft,
 } from './skills/skillLifecycle.js'
+export { DuoAgent } from './agent/duoAgent.js'
+export type { DuoAgentConfig, DuoAgentSession } from './agent/duoAgent.js'
+export {
+  ExternalReviewer,
+  buildReviewContext,
+} from './agent/externalReviewer.js'
+export type {
+  ReviewContext,
+  ReviewResult,
+  ReviewSuggestion,
+  ReviewAuditEntry,
+  ExternalReviewerOptions,
+} from './agent/externalReviewer.js'
 export { FusionWorkspace, start } from './start.js'
 export { RuntimeMonitor } from './runtime/runtimeMonitor.js'
+export { createMetricsExporter } from './runtime/metricsExporter.js'
+export type { MetricSnapshot, MetricsExporter } from './runtime/metricsExporter.js'
+export { createStructuredLogger, getLogger, setLogger } from './runtime/structuredLogger.js'
+export type { StructuredLogger, StructuredLoggerConfig, LogLevel } from './runtime/structuredLogger.js'
+export { createSecretStore, getDefaultSecretStore, setDefaultSecretStore } from './runtime/secretStore.js'
+export type { SecretStore, EncryptedBlob } from './runtime/secretStore.js'
+export { createAlertEngine } from './runtime/alerting.js'
+export type { Alert, AlertRule, AlertHandler, AlertEngine } from './runtime/alerting.js'
+export { createMockProvider, collectChatResult } from './llm/llmProvider.js'
+export { ProviderRegistry, getDefaultProviderRegistry, loadProvidersFromConfig } from './llm/providerRegistry.js'
 export { PhoenixAuditSnapshotStore, PhoenixAuditStore } from './orchestrator/phoenixAudit.js'
 export { PhoenixCore } from './orchestrator/phoenixCore.js'
 export {
@@ -216,4 +248,7 @@ export type {
   LoopPausedState,
 } from './protocol/loopController.js'
 
-export const VERSION = '0.6.0'
+export type { LlmProvider, LlmFeature, LlmCapabilities, LlmChatOptions, ChatResult } from './llm/llmProvider.js'
+export type { LlmConfig, LlmConfigEntry, ProviderRegistrySnapshot } from './llm/providerRegistry.js'
+
+export const VERSION = '0.14.0'

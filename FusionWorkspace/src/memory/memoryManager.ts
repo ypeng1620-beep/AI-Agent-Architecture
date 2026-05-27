@@ -14,7 +14,7 @@
  * 6. 事件钩子（缓存未命中、摘要生成等）
  */
 
-import { FTS5MemoryStore, type Memory, type SearchResult, embed } from './fts5Memory.js'
+import { FTS5MemoryStore, type Memory, type SearchResult } from './fts5Memory.js'
 import { MemoryPolicy, type MemoryPolicyDecision, type MemoryPolicyInput } from './memoryPolicy.js'
 import { EmlScorer, type EmlScoreDecision, type EmlSignalType } from './emlScoring.js'
 import type { PhoenixAuditStore } from '../orchestrator/phoenixAudit.js'
@@ -387,15 +387,25 @@ export class MemoryManager {
   }
 
   /**
-   * 向量相似度搜索
-   * 
-   * 注意：在大型数据集上性能较差（全表扫描），建议生产环境使用：
-   * - sqlite-vec 扩展（HNSW 索引）
-   * - pgvector（PostgreSQL 向量索引）
-   * - Qdrant/Pinecone 等专用向量数据库
+   * Vector similarity search via sqlite-vec HNSW index.
+   * Falls back to brute-force cosine similarity when vec0 is unavailable.
    */
   async vectorSearch(query: string, limit: number = 10): Promise<SearchResult[]> {
     return this.store.vectorSearch(query, limit)
+  }
+
+  /**
+   * Hybrid search combining FTS5 keyword + vector similarity via RRF fusion.
+   *
+   * Runs both search strategies in parallel and merges results with
+   * Reciprocal Rank Fusion for a unified relevance ranking.
+   */
+  async hybridSearch(
+    query: string,
+    limit: number = 10,
+    options?: { fts5Weight?: number; vectorWeight?: number },
+  ): Promise<SearchResult[]> {
+    return this.store.hybridSearch(query, limit, options)
   }
 
   // ===========================================================================

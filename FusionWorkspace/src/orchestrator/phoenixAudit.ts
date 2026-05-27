@@ -12,6 +12,7 @@ import type { SkillTriggerMatch } from '../skills/skillManager.js'
 import { assertPhoenixBoundaryDecision } from './phoenixBoundaries.js'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { createHmac, timingSafeEqual, randomBytes } from 'crypto'
 
 export type PhoenixAuditStage =
   | 'intent_route'
@@ -39,6 +40,8 @@ export interface PhoenixAuditEntry {
 export interface PhoenixAuditStoreConfig {
   maxEntries?: number
   version?: string
+  /** HMAC key for audit chain integrity. If set, entries are chained with SHA-256 HMACs. */
+  hmacKey?: string
 }
 
 export interface PhoenixAuditReplaySnapshot {
@@ -79,10 +82,15 @@ export class PhoenixAuditStore {
   private entries: PhoenixAuditEntry[] = []
   private maxEntries: number
   private version: string
+  private hmacKey: Buffer | null = null
+  private chainHash: string | null = null
 
   constructor(config: PhoenixAuditStoreConfig = {}) {
     this.maxEntries = config.maxEntries ?? 200
     this.version = config.version ?? 'phoenix-governance-0.1.0'
+    if (config.hmacKey) {
+      this.hmacKey = Buffer.from(config.hmacKey, 'utf-8')
+    }
   }
 
   record(entry: Omit<PhoenixAuditEntry, 'id' | 'timestamp' | 'version'>): PhoenixAuditEntry {
@@ -93,6 +101,20 @@ export class PhoenixAuditStore {
       id: `${Date.now()}-${this.entries.length + 1}`,
       timestamp: Date.now(),
       version: this.version,
+    }
+
+    // Append HMAC chain hash to metadata if integrity is enabled
+    if (this.hmacKey) {
+      const payload = JSON.stringify({
+        id: stored.id,
+        ts: stored.timestamp,
+        stage: stored.stage,
+        decision: stored.decision,
+        prev: this.chainHash,
+      })
+      const hash = createHmac('sha256', this.hmacKey).update(payload).digest('hex')
+      stored.metadata = { ...(stored.metadata ?? {}), _chainHash: hash }
+      this.chainHash = hash
     }
 
     this.entries.push(stored)
@@ -369,6 +391,40 @@ export class PhoenixAuditStore {
 
   getRecent(limit = 20): PhoenixAuditEntry[] {
     return this.entries.slice(-limit).reverse()
+  }
+
+  /**
+   * Verify the HMAC audit chain integrity. Returns the index of the first
+   * tampered entry, or -1 if the chain is intact. Always returns -1 when
+   * HMAC is not configured.
+   */
+  verifyChain(): number {
+    if (!this.hmacKey) return -1
+
+    let prevHash: string | null = null
+    for (let i = 0; i < this.entries.length; i++) {
+      const entry = this.entries[i]!
+      const expectHash = (entry.metadata as Record<string, unknown> | undefined)?.['_chainHash'] as string | undefined
+      if (!expectHash) return i
+
+      const payload = JSON.stringify({
+        id: entry.id,
+        ts: entry.timestamp,
+        stage: entry.stage,
+        decision: entry.decision,
+        prev: prevHash,
+      })
+      const computed = createHmac('sha256', this.hmacKey!).update(payload).digest('hex')
+
+      if (!timingSafeEqual(Buffer.from(computed), Buffer.from(expectHash))) return i
+      prevHash = expectHash
+    }
+    return -1
+  }
+
+  /** Check whether HMAC integrity verification is enabled. */
+  hasIntegrityVerification(): boolean {
+    return this.hmacKey !== null
   }
 
   exportReplaySnapshot(input: {

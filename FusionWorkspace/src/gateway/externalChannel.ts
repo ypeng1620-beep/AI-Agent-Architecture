@@ -9,7 +9,7 @@ import type { IChannel, ChannelType } from '../gateway/gateway.js'
 import type { ChannelMessage, Session } from '../gateway/gateway.js'
 import type { AdapterCapabilities } from '../protocol/adapterSchema.js'
 import { DEFAULT_CAPABILITIES } from '../protocol/adapterSchema.js'
-import { mkdir, rename, stat, writeFile } from 'fs/promises'
+import { mkdir, rename, stat, writeFile, readFile } from 'fs/promises'
 import { dirname } from 'path'
 import {
   ExternalIngressGuard,
@@ -73,6 +73,10 @@ export interface ExternalChannelConfig {
   maxRetries?: number
   /** 重试间隔（毫秒） */
   retryIntervalMs?: number
+  /** DLQ persistence path (JSONL). When set, failed messages are persisted. */
+  dlqPath?: string
+  /** Maximum DLQ entries before oldest are evicted. */
+  dlqMaxEntries?: number
 }
 
 // =============================================================================
@@ -115,11 +119,25 @@ export class MessageDeduplicator {
 }
 
 // =============================================================================
+// Dead Letter Queue
+// =============================================================================
+
+export interface DeadLetterEntry {
+  id: string
+  channel: ChannelType
+  target: string
+  content: string
+  error: string
+  failedAt: number
+  retryCount: number
+}
+
+// =============================================================================
 // 外部渠道抽象基类
 // =============================================================================
 
 export abstract class ExternalChannel implements IChannel {
-  protected config: Required<Omit<ExternalChannelConfig, 'ingressGuard' | 'ingressAuditLogPath' | 'ingressAuditMaxBytes' | 'requireProductionReady'>> & {
+  protected config: Required<Omit<ExternalChannelConfig, 'ingressGuard' | 'ingressAuditLogPath' | 'ingressAuditMaxBytes' | 'requireProductionReady' | 'dlqPath' | 'dlqMaxEntries'>> & {
     ingressAuditLogPath?: string
     ingressAuditMaxBytes?: number
     requireProductionReady?: boolean
@@ -130,8 +148,13 @@ export abstract class ExternalChannel implements IChannel {
   protected ingressRejections: Partial<Record<ExternalIngressDecisionReason, number>> = {}
   protected recentIngressAudits: ExternalIngressAuditEvent[] = []
   protected running: boolean = false
+  protected dlq: DeadLetterEntry[] = []
+  protected dlqPath?: string
+  protected dlqMaxEntries: number
 
   constructor(config: ExternalChannelConfig) {
+    this.dlqPath = config.dlqPath
+    this.dlqMaxEntries = config.dlqMaxEntries ?? 500
     this.config = {
       type: config.type,
       capabilities: config.capabilities ?? DEFAULT_CAPABILITIES,
@@ -144,6 +167,7 @@ export abstract class ExternalChannel implements IChannel {
       ingressAuditMaxBytes: config.ingressAuditMaxBytes,
       requireProductionReady: config.requireProductionReady,
     }
+    this.loadDlq().catch(() => { /* DLQ load is best-effort */ })
     this.deduplicator = new MessageDeduplicator(this.config.dedupWindowMs)
     if (config.ingressGuard instanceof ExternalIngressGuard) {
       this.ingressGuard = config.ingressGuard
@@ -169,22 +193,6 @@ export abstract class ExternalChannel implements IChannel {
 
   getType(): ChannelType {
     return this.config.type
-  }
-
-  getStats(): Record<string, unknown> {
-    return {
-      type: this.config.type,
-      activeSessions: this.sessions.size,
-      dedupCacheSize: this.deduplicator.size,
-      ingressGuard: this.ingressGuard?.getStats(),
-      ingressRejections: { ...this.ingressRejections },
-      recentIngressAudits: [...this.recentIngressAudits],
-      auditPersistence: {
-        logPath: this.config.ingressAuditLogPath,
-        maxBytes: this.config.ingressAuditMaxBytes,
-      },
-      running: this.running,
-    }
   }
 
   getCapabilities(): AdapterCapabilities {
@@ -315,9 +323,13 @@ export abstract class ExternalChannel implements IChannel {
       return
     }
 
-    await mkdir(dirname(logPath), { recursive: true })
-    await this.rotateIngressAuditIfNeeded(logPath)
-    await writeFile(logPath, `${JSON.stringify(event)}\n`, { flag: 'a' })
+    try {
+      await mkdir(dirname(logPath), { recursive: true })
+      await this.rotateIngressAuditIfNeeded(logPath)
+      await writeFile(logPath, `${JSON.stringify(event)}\n`, { flag: 'a' })
+    } catch (err) {
+      console.warn('[ExternalChannel] Failed to persist ingress audit:', err)
+    }
   }
 
   private async rotateIngressAuditIfNeeded(logPath: string): Promise<void> {
@@ -343,15 +355,135 @@ export abstract class ExternalChannel implements IChannel {
   protected async sendWithRetry(
     sendFn: () => Promise<void>,
     retries: number = 0,
+    dlqContext?: { target: string; content: string },
   ): Promise<void> {
     try {
       await sendFn()
     } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error)
       if (retries < this.config.maxRetries) {
         await new Promise(resolve => setTimeout(resolve, this.config.retryIntervalMs * Math.pow(2, retries)))
-        return this.sendWithRetry(sendFn, retries + 1)
+        return this.sendWithRetry(sendFn, retries + 1, dlqContext)
       }
-      throw error
+      // Max retries exhausted — enqueue to DLQ
+      console.error(`[ExternalChannel:${this.config.type}] sendWithRetry exhausted retries:`, errMsg)
+      if (dlqContext) {
+        this.enqueueDlq(dlqContext.target, dlqContext.content, errMsg, retries)
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Dead Letter Queue
+  // -------------------------------------------------------------------------
+
+  /** Enqueue a failed message to the DLQ. */
+  protected enqueueDlq(target: string, content: string, error: string, retryCount: number): void {
+    const entry: DeadLetterEntry = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      channel: this.config.type,
+      target,
+      content,
+      error,
+      failedAt: Date.now(),
+      retryCount,
+    }
+
+    this.dlq.push(entry)
+    while (this.dlq.length > this.dlqMaxEntries) {
+      this.dlq.shift()
+    }
+
+    this.persistDlq()
+  }
+
+  /** Get DLQ statistics. */
+  getDlqStats(): { size: number; oldestEntry?: DeadLetterEntry; recentErrors: string[] } {
+    return {
+      size: this.dlq.length,
+      oldestEntry: this.dlq[0],
+      recentErrors: this.dlq.slice(-5).map((e) => e.error),
+    }
+  }
+
+  /** Replay all DLQ entries via the provided send function. Returns success count. */
+  async replayDlq(sendFn: (target: string, content: string) => Promise<void>): Promise<number> {
+    const entries = [...this.dlq]
+    this.dlq = []
+    let successCount = 0
+    for (const entry of entries) {
+      try {
+        await sendFn(entry.target, entry.content)
+        successCount++
+      } catch {
+        this.dlq.push(entry)
+      }
+    }
+    this.persistDlq()
+    return successCount
+  }
+
+  /** Flush all DLQ entries. */
+  flushDlq(): void {
+    this.dlq = []
+    this.persistDlq()
+  }
+
+  private async loadDlq(): Promise<void> {
+    if (!this.dlqPath) return
+    try {
+      const raw = await readFile(this.dlqPath, 'utf-8')
+      this.dlq = raw.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as DeadLetterEntry)
+    } catch {
+      this.dlq = []
+    }
+  }
+
+  private async persistDlq(): Promise<void> {
+    if (!this.dlqPath) return
+    try {
+      await mkdir(dirname(this.dlqPath), { recursive: true })
+      await writeFile(this.dlqPath, this.dlq.map((e) => JSON.stringify(e)).join('\n') + '\n')
+    } catch {
+      // DLQ persistence failure is non-fatal
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Health check
+  // -------------------------------------------------------------------------
+
+  /** Channel health check — override to probe external API. */
+  async healthCheck(): Promise<{ status: 'ok' | 'degraded' | 'unavailable'; detail?: string }> {
+    if (!this.running) {
+      return { status: 'unavailable', detail: 'Channel is not running' }
+    }
+    const dlqStats = this.getDlqStats()
+    if (dlqStats.size > 100) {
+      return { status: 'degraded', detail: `DLQ has ${dlqStats.size} pending entries` }
+    }
+    return { status: 'ok' }
+  }
+
+  // -------------------------------------------------------------------------
+  // Helpers
+  // -------------------------------------------------------------------------
+
+  /** Update the getStats to include DLQ info. */
+  getStats(): Record<string, unknown> {
+    return {
+      type: this.config.type,
+      activeSessions: this.sessions.size,
+      dedupCacheSize: this.deduplicator.size,
+      ingressGuard: this.ingressGuard?.getStats(),
+      ingressRejections: { ...this.ingressRejections },
+      recentIngressAudits: [...this.recentIngressAudits],
+      auditPersistence: {
+        logPath: this.config.ingressAuditLogPath,
+        maxBytes: this.config.ingressAuditMaxBytes,
+      },
+      dlq: this.getDlqStats(),
+      running: this.running,
     }
   }
 

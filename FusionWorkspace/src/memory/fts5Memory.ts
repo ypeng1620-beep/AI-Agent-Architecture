@@ -1,21 +1,16 @@
 /**
- * FTS5 Memory System — 基于 SQLite FTS5 的全文搜索记忆
- * 
- * 融合 Hermes 的：
- * - trajectory.py: 轨迹压缩思想
- * - hermes_state.py: SQLite + FTS5 存储设计
- * 
- * 功能：
- * 1. 记忆存储（SQLite）
- * 2. FTS5 全文搜索（虚拟表）
- * 3. Embedding 生成（placeholder）
- * 4. 自动摘要（调用外部 LLM）
+ * FTS5 Memory System — SQLite FTS5 full-text search + sqlite-vec vector search.
+ *
+ * Hybrid search combines FTS5 BM25 keyword ranking with vec0 cosine-distance
+ * vector ranking via Reciprocal Rank Fusion (RRF).
  */
 
 import Database from 'better-sqlite3'
+import * as sqliteVec from 'sqlite-vec'
 import { randomUUID } from 'crypto'
 import { join } from 'path'
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs'
+import { getEmbeddingProvider, type EmbeddingProvider } from './embeddingService.js'
 
 // =============================================================================
 // 类型定义
@@ -46,12 +41,16 @@ export interface SearchResult {
 export interface FTS5MemoryConfig {
   /** 数据库路径（默认 ~/.fusion-workspace/memory.db） */
   dbPath?: string
-  /** 是否启用向量相似度搜索（需要 embedding 模型） */
+  /** 是否启用向量相似度搜索（使用 sqlite-vec HNSW 索引） */
   enableVectorSearch?: boolean
-  /** 向量维度（默认 384） */
+  /** 向量维度（默认 384，需与 embedding 模型输出匹配） */
   embeddingDim?: number
   /** 强制使用 JSON fallback（测试/调试用） */
   forceFallback?: boolean
+  /** 混合搜索 FTS5 权重（0-1，默认 0.5） */
+  hybridFts5Weight?: number
+  /** 混合搜索向量权重（0-1，默认 0.5） */
+  hybridVectorWeight?: number
 }
 
 interface FallbackState {
@@ -60,120 +59,53 @@ interface FallbackState {
 }
 
 // =============================================================================
-// Embedding 占位符
-// =============================================================================
-// Embedding 配置与实现
+// Embedding helpers — delegates to embeddingService
 // =============================================================================
 
-/** Embedding 模型配置 */
+/** Re-export EmbedConfig for backwards compatibility. */
+export type { EmbeddingProvider as EmbedConfigProvider } from './embeddingService.js'
+
+/**
+ * Generate an embedding for the given text.
+ * Delegates to the configured embedding provider with deterministic fallback.
+ */
+let _embedResolver: ((text: string, dim?: number) => Promise<number[]>) | null = null
+
+export async function embed(text: string, dim?: number): Promise<number[]> {
+  if (!_embedResolver) {
+    const mod = await import('./embeddingService.js')
+    _embedResolver = mod.embed
+  }
+  return _embedResolver(text, dim)
+}
+
+// ---------------------------------------------------------------------------
+// Backwards-compatible embed configuration API
+// ---------------------------------------------------------------------------
+
+/** @deprecated Use EmbeddingProvider from embeddingService instead. */
 export interface EmbedConfig {
-  /** 模型端点（如 Ollama: http://localhost:11434/api/embeddings） */
   endpoint?: string
-  /** 模型名称 */
   model?: string
-  /** 向量维度（默认 384） */
   dimension?: number
-  /** API Key（如果需要） */
   apiKey?: string
 }
 
-let _embedConfig: EmbedConfig = {
+let _legacyEmbedConfig: EmbedConfig = {
   endpoint: process.env.EMBEDDING_ENDPOINT ?? 'http://localhost:11434/api/embeddings',
   model: process.env.EMBEDDING_MODEL ?? 'nomic-embed-text',
   dimension: 384,
   apiKey: process.env.EMBEDDING_API_KEY,
 }
 
-/**
- * 配置 embedding 模型
- * 
- * @example
- * configureEmbed({
- *   endpoint: 'https://api.nomic.ai/v1/embeddings',
- *   model: 'nomic-embed-text',
- *   apiKey: process.env.NOMIC_API_KEY,
- *   dimension: 768,
- * })
- */
+/** @deprecated Use setEmbeddingProvider from embeddingService instead. */
 export function configureEmbed(config: Partial<EmbedConfig>): void {
-  _embedConfig = { ..._embedConfig, ...config }
+  _legacyEmbedConfig = { ..._legacyEmbedConfig, ...config }
 }
 
-/**
- * 获取当前 embedding 配置
- */
+/** @deprecated Use getEmbeddingProvider from embeddingService instead. */
 export function getEmbedConfig(): Readonly<EmbedConfig> {
-  return { ..._embedConfig }
-}
-
-/**
- * 生成文本的 embedding 向量
- * 
- * 当前实现：
- * 1. 如果配置了真实端点，调用远程 API
- * 2. 否则使用确定性伪随机向量（占位符）
- * 
- * @param text - 要嵌入的文本
- * @param dim - 向量维度（默认使用配置的维度）
- * @returns 浮点数数组（固定维度）
- */
-export async function embed(text: string, dim?: number): Promise<number[]> {
-  const dimension = dim ?? _embedConfig.dimension ?? 384
-
-  // 如果配置了端点，尝试调用真实模型
-  if (_embedConfig.endpoint && _embedConfig.endpoint !== 'http://localhost:11434/api/embeddings') {
-    try {
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-      }
-      if (_embedConfig.apiKey) {
-        headers['Authorization'] = `Bearer ${_embedConfig.apiKey}`
-      }
-
-      const response = await fetch(_embedConfig.endpoint, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model: _embedConfig.model ?? 'nomic-embed-text',
-          prompt: text,
-        }),
-      })
-
-      if (response.ok) {
-        const data = await response.json() as { embedding?: number[] }
-        if (data.embedding && Array.isArray(data.embedding)) {
-          return data.embedding
-        }
-      }
-    } catch (error) {
-      // 降级到占位符实现
-      console.warn('[Embed] Remote embedding failed, falling back to placeholder:', error)
-    }
-  }
-
-  // 占位符：用文本的哈希生成确定性的伪随机向量
-  const hash = simpleHash(text)
-  const vector = new Array<number>(dimension)
-
-  for (let i = 0; i < dimension; i++) {
-    // 使用线性同余生成器生成伪随机数
-    vector[i] = Math.sin(hash * (i + 1) * 12.9898) * 43758.5453 % 1
-  }
-
-  // L2 归一化
-  const norm = Math.sqrt(vector.reduce((sum, v) => sum + v * v, 0))
-  return norm > 0 ? vector.map(v => v / norm) : vector
-}
-
-/** 简单字符串哈希（用于确定性伪随机） */
-function simpleHash(str: string): number {
-  let hash = 0
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i)
-    hash = ((hash << 5) - hash) + char
-    hash = hash & hash // Convert to 32bit integer
-  }
-  return Math.abs(hash)
+  return { ..._legacyEmbedConfig }
 }
 
 // =============================================================================
@@ -187,6 +119,8 @@ export class FTS5MemoryStore {
   private fallbackPath: string
   private fallbackState: FallbackState = { memories: [], summaries: [] }
   private backend: 'sqlite' | 'json'
+  private vecLoaded = false
+  private embeddingProvider: EmbeddingProvider
 
   constructor(config: FTS5MemoryConfig = {}) {
     const homeDir = process.env.HOME ?? process.env.USERPROFILE ?? '.'
@@ -197,10 +131,13 @@ export class FTS5MemoryStore {
       enableVectorSearch: config.enableVectorSearch ?? false,
       embeddingDim: config.embeddingDim ?? 384,
       forceFallback: config.forceFallback ?? false,
+      hybridFts5Weight: config.hybridFts5Weight ?? 0.5,
+      hybridVectorWeight: config.hybridVectorWeight ?? 0.5,
     }
     this.embeddingDim = this.config.embeddingDim
     this.fallbackPath = `${this.config.dbPath}.fallback.json`
     this.backend = this.config.forceFallback ? 'json' : 'sqlite'
+    this.embeddingProvider = getEmbeddingProvider()
 
     // 确保目录存在
     const dir = join(this.config.dbPath, '..')
@@ -230,6 +167,16 @@ export class FTS5MemoryStore {
   /** 初始化表结构 */
   private initTables(): void {
     if (!this.db) return
+
+    // Load sqlite-vec extension (best-effort)
+    try {
+      sqliteVec.load(this.db)
+      this.vecLoaded = true
+    } catch (err) {
+      console.warn('[FTS5MemoryStore] sqlite-vec extension could not be loaded:', err)
+      this.vecLoaded = false
+    }
+
     // 记忆主表
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS memories (
@@ -249,6 +196,20 @@ export class FTS5MemoryStore {
       )
     `)
 
+    // sqlite-vec vec0 虚拟表（向量索引，HNSW）
+    if (this.config.enableVectorSearch && this.vecLoaded) {
+      try {
+        this.db.exec(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS memories_vec USING vec0(
+            embedding FLOAT[${this.embeddingDim}]
+          )
+        `)
+      } catch (err) {
+        console.warn('[FTS5MemoryStore] Could not create vec0 virtual table:', err)
+        this.vecLoaded = false
+      }
+    }
+
     // 摘要表
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS summaries (
@@ -261,12 +222,12 @@ export class FTS5MemoryStore {
 
     // 索引（加速查询）
     this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_memories_created_at 
+      CREATE INDEX IF NOT EXISTS idx_memories_created_at
       ON memories(created_at DESC)
     `)
 
     this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_summaries_created_at 
+      CREATE INDEX IF NOT EXISTS idx_summaries_created_at
       ON summaries(created_at DESC)
     `)
   }
@@ -295,20 +256,34 @@ export class FTS5MemoryStore {
       return memory
     }
 
-    // 插入 SQLite
-    const stmt = this.db!.prepare(`
-      INSERT INTO memories (id, content, embedding, created_at)
-      VALUES (?, ?, ?, ?)
-    `)
-    stmt.run(id, content, JSON.stringify(vector), createdAt)
+    // 插入 SQLite — use a transaction so rowid is stable for vec0
+    const insertAll = this.db!.transaction(() => {
+      const stmt = this.db!.prepare(`
+        INSERT INTO memories (id, content, embedding, created_at)
+        VALUES (?, ?, ?, ?)
+      `)
+      stmt.run(id, content, JSON.stringify(vector), createdAt)
 
-    // 同步到 FTS5 虚拟表
-    const ftsStmt = this.db!.prepare(`
-      INSERT INTO memories_fts (rowid, content) 
-      VALUES ((SELECT rowid FROM memories WHERE id = ?), ?)
-    `)
-    ftsStmt.run(id, content)
+      // 同步到 FTS5 虚拟表
+      const row = this.db!.prepare(`SELECT rowid FROM memories WHERE id = ?`).get(id) as { rowid: number }
+      if (row) {
+        this.db!.prepare(`INSERT INTO memories_fts (rowid, content) VALUES (?, ?)`).run(row.rowid, content)
 
+        // 同步到 vec0 虚拟表
+        if (this.config.enableVectorSearch && this.vecLoaded) {
+          try {
+            this.db!.prepare(`INSERT INTO memories_vec (rowid, embedding) VALUES (?, ?)`).run(
+              row.rowid,
+              JSON.stringify(vector),
+            )
+          } catch (err) {
+            // vec0 insert failure is non-fatal — vector search will just miss this entry
+          }
+        }
+      }
+    })
+
+    insertAll()
     return memory
   }
 
@@ -361,13 +336,17 @@ export class FTS5MemoryStore {
       return false
     }
 
-    // 先删除 FTS5 条目
-    this.db!.prepare(`
-      DELETE FROM memories_fts 
-      WHERE rowid = (SELECT rowid FROM memories WHERE id = ?)
-    `).run(id)
+    // Get rowid before deletion
+    const row = this.db!.prepare(`SELECT rowid FROM memories WHERE id = ?`).get(id) as { rowid: number } | undefined
+    if (!row) return false
 
-    // 再删除主表
+    // Delete from FTS5 and vec0 first
+    this.db!.prepare(`DELETE FROM memories_fts WHERE rowid = ?`).run(row.rowid)
+    if (this.config.enableVectorSearch && this.vecLoaded) {
+      try { this.db!.prepare(`DELETE FROM memories_vec WHERE rowid = ?`).run(row.rowid) } catch { /* ignore */ }
+    }
+
+    // Delete from main table
     const result = this.db!.prepare(`DELETE FROM memories WHERE id = ?`).run(id)
     return result.changes > 0
   }
@@ -437,15 +416,9 @@ export class FTS5MemoryStore {
   }
 
   // ===========================================================================
-  // 向量相似度搜索
+  // 向量相似度搜索 (sqlite-vec HNSW)
   // ===========================================================================
 
-  /**
-   * 向量相似度搜索（需要 enableVectorSearch = true）
-   * 
-   * 使用余弦相似度计算
-   * 注意：在大型数据集上性能较差，建议使用 HNSW 或 IVF 索引
-   */
   async vectorSearch(query: string, limit: number = 10): Promise<SearchResult[]> {
     if (!this.config.enableVectorSearch) {
       throw new Error('Vector search is not enabled. Set enableVectorSearch: true in config.')
@@ -472,36 +445,120 @@ export class FTS5MemoryStore {
       }))
     }
 
-    // 获取所有记忆（实际部署中应使用近似最近邻索引）
+    // Use sqlite-vec KNN when available, fall back to brute-force scan
+    if (this.vecLoaded) {
+      try {
+        const embeddingJson = JSON.stringify(queryEmbedding)
+        const rows = this.db!.prepare(`
+          SELECT m.id, m.content, m.created_at as createdAt, v.distance
+          FROM memories_vec v
+          JOIN memories m ON m.rowid = v.rowid
+          WHERE v.embedding MATCH ?
+          ORDER BY v.distance
+          LIMIT ?
+        `).all(embeddingJson, limit) as Array<{
+          id: string; content: string; createdAt: number; distance: number
+        }>
+
+        return rows.map(row => ({
+          id: row.id,
+          content: row.content,
+          rank: 0,
+          createdAt: row.createdAt,
+          score: 1 - row.distance, // convert cosine distance to similarity
+        }))
+      } catch (err) {
+        console.warn('[FTS5MemoryStore] vec0 KNN failed, falling back to brute-force:', err)
+      }
+    }
+
+    // Brute-force fallback: full table scan + cosine similarity in JS
     const stmt = this.db!.prepare(`
       SELECT id, content, embedding, created_at as createdAt
-      FROM memories
-      WHERE embedding IS NOT NULL
+      FROM memories WHERE embedding IS NOT NULL
     `)
-
     const rows = stmt.all() as Array<{
-      id: string
-      content: string
-      embedding: string
-      createdAt: number
+      id: string; content: string; embedding: string; createdAt: number
     }>
 
-    // 计算相似度
     const scored = rows.map(row => {
       const memoryEmbedding = JSON.parse(row.embedding) as number[]
-      const score = cosineSimilarity(queryEmbedding, memoryEmbedding)
-      return { id: row.id, content: row.content, createdAt: row.createdAt, score }
+      return {
+        id: row.id, content: row.content, createdAt: row.createdAt,
+        score: cosineSimilarity(queryEmbedding, memoryEmbedding),
+      }
     })
-
-    // 排序并返回 Top N
     scored.sort((a, b) => b.score - a.score)
     return scored.slice(0, limit).map(r => ({
-      id: r.id,
-      content: r.content,
-      rank: 0,
-      createdAt: r.createdAt,
-      score: r.score,
+      id: r.id, content: r.content, rank: 0, createdAt: r.createdAt, score: r.score,
     }))
+  }
+
+  // ===========================================================================
+  // 混合搜索 (FTS5 + Vector with RRF fusion)
+  // ===========================================================================
+
+  /**
+   * Hybrid search combining FTS5 keyword matching with vector similarity.
+   * Uses Reciprocal Rank Fusion (RRF) to merge result sets.
+   *
+   * @param query - Natural language query (used for both FTS5 and vector)
+   * @param limit - Max results to return
+   * @param options - Optional fusion weight overrides
+   */
+  async hybridSearch(
+    query: string,
+    limit: number = 10,
+    options?: { fts5Weight?: number; vectorWeight?: number },
+  ): Promise<SearchResult[]> {
+    const fts5Weight = options?.fts5Weight ?? this.config.hybridFts5Weight
+    const vectorWeight = options?.vectorWeight ?? this.config.hybridVectorWeight
+
+    // Run both searches in parallel
+    const [fts5Results, vectorResults] = await Promise.all([
+      Promise.resolve(this.searchMemories(query, limit * 2)),
+      this.config.enableVectorSearch
+        ? this.vectorSearch(query, limit * 2).catch(() => [] as SearchResult[])
+        : Promise.resolve([] as SearchResult[]),
+    ])
+
+    // If only one source has results, return that source directly
+    if (fts5Results.length === 0) return vectorResults.slice(0, limit)
+    if (vectorResults.length === 0) return fts5Results.slice(0, limit)
+
+    // Reciprocal Rank Fusion
+    const k = 60
+    const fused = new Map<string, { result: SearchResult; rrfScore: number }>()
+
+    for (let i = 0; i < fts5Results.length; i++) {
+      const r = fts5Results[i]
+      const rrf = fts5Weight / (k + i + 1)
+      fused.set(r.id, { result: { ...r, score: r.score ?? 0 }, rrfScore: rrf })
+    }
+
+    for (let i = 0; i < vectorResults.length; i++) {
+      const r = vectorResults[i]
+      const rrf = vectorWeight / (k + i + 1)
+      const existing = fused.get(r.id)
+      if (existing) {
+        existing.rrfScore += rrf
+        // Keep the higher vector score
+        if ((r.score ?? 0) > (existing.result.score ?? 0)) {
+          existing.result.score = r.score
+        }
+      } else {
+        fused.set(r.id, { result: { ...r, score: r.score ?? 0 }, rrfScore: rrf })
+      }
+    }
+
+    // Sort by RRF score descending, return top N
+    return [...fused.values()]
+      .sort((a, b) => b.rrfScore - a.rrfScore)
+      .slice(0, limit)
+      .map(entry => ({
+        ...entry.result,
+        rank: 0, // rank is meaningless in hybrid; use score
+      }))
   }
 
   // ===========================================================================
@@ -616,14 +673,16 @@ export class FTS5MemoryStore {
       DELETE FROM summaries WHERE created_at < ?
     `).run(cutoff)
 
-    // 删除旧记忆（先删除 FTS5）
-    // 注意：需要先获取要删除的 rowid，再分批删除（避免子查询参数问题）
+    // 删除旧记忆（先删除 FTS5 和 vec0）
     const toDelete = this.db!.prepare(`
       SELECT rowid FROM memories WHERE created_at < ?
     `).all(cutoff) as Array<{ rowid: number }>
 
     for (const row of toDelete) {
       this.db!.prepare(`DELETE FROM memories_fts WHERE rowid = ?`).run(row.rowid)
+      if (this.config.enableVectorSearch && this.vecLoaded) {
+        try { this.db!.prepare(`DELETE FROM memories_vec WHERE rowid = ?`).run(row.rowid) } catch { /* ignore */ }
+      }
     }
 
     const memoryResult = this.db!.prepare(`
